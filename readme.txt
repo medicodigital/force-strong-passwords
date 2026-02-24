@@ -1,11 +1,16 @@
-=== Force Strong Passwords ===
-Contributors: boogah, gyrus, simonwheatley, sparanoid, jpry, zyphonic, Medico Digital
-Tags: passwords, security, users, profile
+=== Enhanced Security ===
 Requires at least: 3.7
 Tested up to: 4.9
-Stable tag: 1.8
+Stable tag: 1.9
+Tags: passwords, security, users, profile
+
+=== Based on Force Strong Passwords  ===
+Contributors: boogah, gyrus, simonwheatley, sparanoid, jpry, zyphonic
 
 Forces users to set a strong password.
+Adds options for password min length
+Adds password expirey
+Adds some additional security options
 
 == Description ==
 The user profile editor includes a JavaScript-powered password strength indicator. However, there is nothing currently built into WordPress core to prevent users from entering weak passwords. Users changing their password to something weak is one of the most vulnerable aspects of a WordPress installation.
