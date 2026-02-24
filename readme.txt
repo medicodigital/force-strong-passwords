@@ -1,6 +1,5 @@
 === Force Strong Passwords ===
 Contributors: boogah, gyrus, simonwheatley, sparanoid, jpry, zyphonic, Medico Digital
-Donate link: https://www.girldevelopit.com/donate
 Tags: passwords, security, users, profile
 Requires at least: 3.7
 Tested up to: 4.9
