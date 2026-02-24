@@ -84,6 +84,35 @@ if ( ! defined( 'SLT_FSP_PASSWORD_MIN_AGE_DAYS' ) ) {
 }
 
 
+/**
+ * Retrieve a plugin setting. Priority: database option > PHP constant > default.
+ *
+ * @since 1.9.0
+ * @param string $key     The setting key (without the slt_fsp_ prefix used in the DB).
+ * @param mixed  $default Fallback value if nothing else is set.
+ * @return mixed
+ */
+function slt_fsp_get_option( $key, $default = false ) {
+	$options = get_option( 'slt_fsp_settings', array() );
+	if ( isset( $options[ $key ] ) && '' !== $options[ $key ] ) {
+		return $options[ $key ];
+	}
+
+	$constant_map = array(
+		'min_password_length'    => 'SLT_FSP_MIN_PASSWORD_LENGTH',
+		'password_history_count' => 'SLT_FSP_PASSWORD_HISTORY_COUNT',
+		'password_expiry_days'   => 'SLT_FSP_PASSWORD_EXPIRY_DAYS',
+		'password_min_age_days'  => 'SLT_FSP_PASSWORD_MIN_AGE_DAYS',
+	);
+
+	if ( isset( $constant_map[ $key ] ) && defined( $constant_map[ $key ] ) ) {
+		return constant( $constant_map[ $key ] );
+	}
+
+	return $default;
+}
+
+
 // Initialize other stuff.
 add_action( 'plugins_loaded', 'slt_fsp_init' );
 function slt_fsp_init() {
@@ -95,6 +124,10 @@ function slt_fsp_init() {
 	add_action( 'user_profile_update_errors', 'slt_fsp_validate_profile_update', 0, 3 );
 	add_action( 'validate_password_reset', 'slt_fsp_validate_strong_password', 10, 2 );
 	add_action( 'resetpass_form', 'slt_fsp_validate_resetpass_form', 10 );
+
+	// Settings page.
+	add_action( 'admin_menu', 'slt_fsp_add_settings_page' );
+	add_action( 'admin_init', 'slt_fsp_register_settings' );
 
 	// Password history and expiry hooks.
 	add_action( 'after_password_reset', 'slt_fsp_after_password_reset', 10, 2 );
@@ -173,7 +206,7 @@ function slt_fsp_validate_strong_password( $errors, $user_data ) {
 	// Enforce?
 	if ( $enforce ) {
 
-		$min_length = apply_filters( 'slt_fsp_min_password_length', 15 );
+		$min_length = apply_filters( 'slt_fsp_min_password_length', (int) slt_fsp_get_option( 'min_password_length', 15 ) );
 
 		if ( strlen( $password ) < $min_length ) {
 			$password_ok = false;
@@ -188,7 +221,7 @@ function slt_fsp_validate_strong_password( $errors, $user_data ) {
 
 		// Enforce minimum password age to prevent rapid cycling.
 		if ( $user_id ) {
-			$min_age_days  = apply_filters( 'slt_fsp_password_min_age_days', SLT_FSP_PASSWORD_MIN_AGE_DAYS );
+			$min_age_days  = apply_filters( 'slt_fsp_password_min_age_days', (int) slt_fsp_get_option( 'password_min_age_days', SLT_FSP_PASSWORD_MIN_AGE_DAYS ) );
 			$last_changed  = get_user_meta( $user_id, 'slt_fsp_password_last_changed', true );
 			if ( $last_changed && $min_age_days > 0 ) {
 				$earliest_change = $last_changed + ( $min_age_days * DAY_IN_SECONDS );
@@ -215,7 +248,7 @@ function slt_fsp_validate_strong_password( $errors, $user_data ) {
 				return $errors;
 			}
 			if ( slt_fsp_is_password_in_history( $password, $user_id ) ) {
-				$max_history = apply_filters( 'slt_fsp_password_history_count', SLT_FSP_PASSWORD_HISTORY_COUNT );
+				$max_history = apply_filters( 'slt_fsp_password_history_count', (int) slt_fsp_get_option( 'password_history_count', SLT_FSP_PASSWORD_HISTORY_COUNT ) );
 				if ( is_wp_error( $errors ) ) {
 					$errors->add( 'pass', sprintf(
 						/* translators: %d: number of previous passwords stored */
@@ -251,6 +284,193 @@ function slt_fsp_validate_strong_password( $errors, $user_data ) {
 	}
 
 	return $errors;
+}
+
+
+/**
+ * Add the plugin settings page under Settings.
+ *
+ * @since 1.9.0
+ */
+function slt_fsp_add_settings_page() {
+	add_options_page(
+		__( 'Force Strong Passwords', 'slt-force-strong-passwords' ),
+		__( 'Strong Passwords', 'slt-force-strong-passwords' ),
+		'manage_options',
+		'slt-force-strong-passwords',
+		'slt_fsp_render_settings_page'
+	);
+}
+
+
+/**
+ * Register plugin settings, sections, and fields.
+ *
+ * @since 1.9.0
+ */
+function slt_fsp_register_settings() {
+	register_setting( 'slt_fsp_settings_group', 'slt_fsp_settings', 'slt_fsp_sanitize_settings' );
+
+	add_settings_section(
+		'slt_fsp_password_policy',
+		__( 'Password Policy', 'slt-force-strong-passwords' ),
+		'slt_fsp_policy_section_cb',
+		'slt-force-strong-passwords'
+	);
+
+	add_settings_field(
+		'min_password_length',
+		__( 'Minimum Password Length', 'slt-force-strong-passwords' ),
+		'slt_fsp_field_number_cb',
+		'slt-force-strong-passwords',
+		'slt_fsp_password_policy',
+		array(
+			'key'         => 'min_password_length',
+			'default'     => 15,
+			'min'         => 8,
+			'max'         => 128,
+			'description' => __( 'Minimum number of characters required for a password.', 'slt-force-strong-passwords' ),
+		)
+	);
+
+	add_settings_field(
+		'password_history_count',
+		__( 'Password History Count', 'slt-force-strong-passwords' ),
+		'slt_fsp_field_number_cb',
+		'slt-force-strong-passwords',
+		'slt_fsp_password_policy',
+		array(
+			'key'         => 'password_history_count',
+			'default'     => SLT_FSP_PASSWORD_HISTORY_COUNT,
+			'min'         => 0,
+			'max'         => 50,
+			'description' => __( 'Number of previous passwords remembered. Users cannot reuse any of these.', 'slt-force-strong-passwords' ),
+		)
+	);
+
+	add_settings_field(
+		'password_expiry_days',
+		__( 'Password Maximum Age (days)', 'slt-force-strong-passwords' ),
+		'slt_fsp_field_number_cb',
+		'slt-force-strong-passwords',
+		'slt_fsp_password_policy',
+		array(
+			'key'         => 'password_expiry_days',
+			'default'     => SLT_FSP_PASSWORD_EXPIRY_DAYS,
+			'min'         => 0,
+			'max'         => 365,
+			'description' => __( 'Days before a password expires. Set to 0 to disable expiry.', 'slt-force-strong-passwords' ),
+		)
+	);
+
+	add_settings_field(
+		'password_min_age_days',
+		__( 'Password Minimum Age (days)', 'slt-force-strong-passwords' ),
+		'slt_fsp_field_number_cb',
+		'slt-force-strong-passwords',
+		'slt_fsp_password_policy',
+		array(
+			'key'         => 'password_min_age_days',
+			'default'     => SLT_FSP_PASSWORD_MIN_AGE_DAYS,
+			'min'         => 0,
+			'max'         => 30,
+			'description' => __( 'Minimum days a user must wait before changing their password again. Prevents rapid cycling.', 'slt-force-strong-passwords' ),
+		)
+	);
+}
+
+
+/**
+ * Settings section description callback.
+ *
+ * @since 1.9.0
+ */
+function slt_fsp_policy_section_cb() {
+	echo '<p>' . esc_html__( 'Configure password strength and lifecycle requirements for privileged users.', 'slt-force-strong-passwords' ) . '</p>';
+}
+
+
+/**
+ * Render a numeric input field for a setting.
+ *
+ * @since 1.9.0
+ * @param array $args Field arguments (key, default, min, max, description).
+ */
+function slt_fsp_field_number_cb( $args ) {
+	$value = slt_fsp_get_option( $args['key'], $args['default'] );
+	printf(
+		'<input type="number" name="slt_fsp_settings[%s]" value="%s" min="%d" max="%d" class="small-text" />',
+		esc_attr( $args['key'] ),
+		esc_attr( $value ),
+		(int) $args['min'],
+		(int) $args['max']
+	);
+	if ( ! empty( $args['description'] ) ) {
+		printf( '<p class="description">%s</p>', esc_html( $args['description'] ) );
+	}
+}
+
+
+/**
+ * Sanitize settings before saving.
+ *
+ * @since 1.9.0
+ * @param array $input Raw form input.
+ * @return array Sanitized values.
+ */
+function slt_fsp_sanitize_settings( $input ) {
+	$sanitized = array();
+	$fields    = array(
+		'min_password_length'    => array( 'min' => 8,  'max' => 128, 'default' => 15 ),
+		'password_history_count' => array( 'min' => 0,  'max' => 50,  'default' => SLT_FSP_PASSWORD_HISTORY_COUNT ),
+		'password_expiry_days'   => array( 'min' => 0,  'max' => 365, 'default' => SLT_FSP_PASSWORD_EXPIRY_DAYS ),
+		'password_min_age_days'  => array( 'min' => 0,  'max' => 30,  'default' => SLT_FSP_PASSWORD_MIN_AGE_DAYS ),
+	);
+
+	foreach ( $fields as $key => $rules ) {
+		if ( isset( $input[ $key ] ) && is_numeric( $input[ $key ] ) ) {
+			$val = (int) $input[ $key ];
+			$sanitized[ $key ] = max( $rules['min'], min( $rules['max'], $val ) );
+		} else {
+			$sanitized[ $key ] = $rules['default'];
+		}
+	}
+
+	if ( $sanitized['password_min_age_days'] >= $sanitized['password_expiry_days'] && $sanitized['password_expiry_days'] > 0 ) {
+		$sanitized['password_min_age_days'] = max( 0, $sanitized['password_expiry_days'] - 1 );
+		add_settings_error(
+			'slt_fsp_settings',
+			'min_age_adjusted',
+			__( 'Minimum age was reduced to be less than the maximum age.', 'slt-force-strong-passwords' ),
+			'warning'
+		);
+	}
+
+	return $sanitized;
+}
+
+
+/**
+ * Render the plugin settings page.
+ *
+ * @since 1.9.0
+ */
+function slt_fsp_render_settings_page() {
+	if ( ! current_user_can( 'manage_options' ) ) {
+		return;
+	}
+	?>
+	<div class="wrap">
+		<h1><?php echo esc_html( get_admin_page_title() ); ?></h1>
+		<form action="options.php" method="post">
+			<?php
+			settings_fields( 'slt_fsp_settings_group' );
+			do_settings_sections( 'slt-force-strong-passwords' );
+			submit_button();
+			?>
+		</form>
+	</div>
+	<?php
 }
 
 
@@ -310,7 +530,7 @@ function slt_fsp_store_password_history( $user_id ) {
 
 	$history[] = $user->user_pass;
 
-	$max_history = apply_filters( 'slt_fsp_password_history_count', SLT_FSP_PASSWORD_HISTORY_COUNT );
+	$max_history = apply_filters( 'slt_fsp_password_history_count', (int) slt_fsp_get_option( 'password_history_count', SLT_FSP_PASSWORD_HISTORY_COUNT ) );
 	if ( count( $history ) > $max_history ) {
 		$history = array_slice( $history, -$max_history );
 	}
@@ -417,7 +637,10 @@ function slt_fsp_is_password_expired( $user_id ) {
 		return false;
 	}
 
-	$expiry_days = apply_filters( 'slt_fsp_password_expiry_days', SLT_FSP_PASSWORD_EXPIRY_DAYS );
+	$expiry_days = apply_filters( 'slt_fsp_password_expiry_days', (int) slt_fsp_get_option( 'password_expiry_days', SLT_FSP_PASSWORD_EXPIRY_DAYS ) );
+	if ( $expiry_days <= 0 ) {
+		return false;
+	}
 	return time() > ( $last_changed + ( $expiry_days * DAY_IN_SECONDS ) );
 }
 
@@ -438,7 +661,7 @@ function slt_fsp_check_password_expiry() {
 	}
 
 	global $pagenow;
-	$allowed_pages = array( 'profile.php', 'admin-ajax.php', 'admin-post.php' );
+	$allowed_pages = array( 'profile.php', 'admin-ajax.php', 'admin-post.php', 'options-general.php' );
 	if ( in_array( $pagenow, $allowed_pages, true ) ) {
 		return;
 	}
