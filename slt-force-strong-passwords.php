@@ -197,9 +197,11 @@ function slt_fsp_validate_strong_password( $errors, $user_data ) {
 
 	} else {
 
-		// No ID yet, adding new user - omit check for "weaker" roles.
-		if ( $role && in_array( $role, apply_filters( 'slt_fsp_weak_roles', array( 'subscriber', 'contributor' ) ) ) ) {
-			$enforce = false;
+		// No ID yet, adding new user - omit check for "weaker" roles unless enforcing for all.
+		if ( ! (int) slt_fsp_get_option( 'enforce_for_all_users', 1 ) ) {
+			if ( $role && in_array( $role, apply_filters( 'slt_fsp_weak_roles', array( 'subscriber', 'contributor' ) ) ) ) {
+				$enforce = false;
+			}
 		}
 	}
 
@@ -319,6 +321,19 @@ function slt_fsp_register_settings() {
 	);
 
 	add_settings_field(
+		'enforce_for_all_users',
+		__( 'Enforce for All Users', 'slt-force-strong-passwords' ),
+		'slt_fsp_field_checkbox_cb',
+		'slt-force-strong-passwords',
+		'slt_fsp_password_policy',
+		array(
+			'key'         => 'enforce_for_all_users',
+			'default'     => 1,
+			'label'       => __( 'Apply password policy to every user role, including subscribers and contributors.', 'slt-force-strong-passwords' ),
+		)
+	);
+
+	add_settings_field(
 		'min_password_length',
 		__( 'Minimum Password Length', 'slt-force-strong-passwords' ),
 		'slt_fsp_field_number_cb',
@@ -386,7 +401,7 @@ function slt_fsp_register_settings() {
  * @since 1.9.0
  */
 function slt_fsp_policy_section_cb() {
-	echo '<p>' . esc_html__( 'Configure password strength and lifecycle requirements for privileged users.', 'slt-force-strong-passwords' ) . '</p>';
+	echo '<p>' . esc_html__( 'Configure password strength and lifecycle requirements.', 'slt-force-strong-passwords' ) . '</p>';
 }
 
 
@@ -412,6 +427,23 @@ function slt_fsp_field_number_cb( $args ) {
 
 
 /**
+ * Render a checkbox input field for a setting.
+ *
+ * @since 1.9.0
+ * @param array $args Field arguments (key, default, label).
+ */
+function slt_fsp_field_checkbox_cb( $args ) {
+	$value = (int) slt_fsp_get_option( $args['key'], $args['default'] );
+	printf(
+		'<label><input type="checkbox" name="slt_fsp_settings[%s]" value="1" %s /> %s</label>',
+		esc_attr( $args['key'] ),
+		checked( $value, 1, false ),
+		esc_html( $args['label'] )
+	);
+}
+
+
+/**
  * Sanitize settings before saving.
  *
  * @since 1.9.0
@@ -420,7 +452,10 @@ function slt_fsp_field_number_cb( $args ) {
  */
 function slt_fsp_sanitize_settings( $input ) {
 	$sanitized = array();
-	$fields    = array(
+
+	$sanitized['enforce_for_all_users'] = ! empty( $input['enforce_for_all_users'] ) ? 1 : 0;
+
+	$fields = array(
 		'min_password_length'    => array( 'min' => 8,  'max' => 128, 'default' => 15 ),
 		'password_history_count' => array( 'min' => 0,  'max' => 50,  'default' => SLT_FSP_PASSWORD_HISTORY_COUNT ),
 		'password_expiry_days'   => array( 'min' => 0,  'max' => 365, 'default' => SLT_FSP_PASSWORD_EXPIRY_DAYS ),
@@ -489,6 +524,10 @@ function slt_fsp_render_settings_page() {
  */
 function slt_fsp_enforce_for_user( $user_id ) {
 	$enforce = true;
+
+	if ( (int) slt_fsp_get_option( 'enforce_for_all_users', 1 ) ) {
+		return $enforce;
+	}
 
 	// Force strong passwords from network admin screens.
 	if ( is_network_admin() ) {
