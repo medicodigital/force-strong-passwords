@@ -55,6 +55,34 @@ if ( ! defined( 'SLT_FSP_CAPS_CHECK' ) ) {
 	define( 'SLT_FSP_CAPS_CHECK', 'publish_posts,upload_files,edit_published_posts' );
 }
 
+if ( ! defined( 'SLT_FSP_PASSWORD_HISTORY_COUNT' ) ) {
+	/**
+	 * Number of previous passwords to store and check against for reuse prevention.
+	 *
+	 * @since 1.9.0
+	 */
+	define( 'SLT_FSP_PASSWORD_HISTORY_COUNT', 13 );
+}
+
+if ( ! defined( 'SLT_FSP_PASSWORD_EXPIRY_DAYS' ) ) {
+	/**
+	 * Number of days before a password expires and must be changed.
+	 *
+	 * @since 1.9.0
+	 */
+	define( 'SLT_FSP_PASSWORD_EXPIRY_DAYS', 30 );
+}
+
+if ( ! defined( 'SLT_FSP_PASSWORD_MIN_AGE_DAYS' ) ) {
+	/**
+	 * Minimum number of days before a password can be changed again.
+	 * Prevents users from rapidly cycling through passwords to circumvent history.
+	 *
+	 * @since 1.9.0
+	 */
+	define( 'SLT_FSP_PASSWORD_MIN_AGE_DAYS', 1 );
+}
+
 
 // Initialize other stuff.
 add_action( 'plugins_loaded', 'slt_fsp_init' );
@@ -67,6 +95,14 @@ function slt_fsp_init() {
 	add_action( 'user_profile_update_errors', 'slt_fsp_validate_profile_update', 0, 3 );
 	add_action( 'validate_password_reset', 'slt_fsp_validate_strong_password', 10, 2 );
 	add_action( 'resetpass_form', 'slt_fsp_validate_resetpass_form', 10 );
+
+	// Password history and expiry hooks.
+	add_action( 'after_password_reset', 'slt_fsp_after_password_reset', 10, 2 );
+	add_action( 'profile_update', 'slt_fsp_after_profile_update', 10, 2 );
+	add_action( 'user_register', 'slt_fsp_on_user_register' );
+	add_action( 'wp_login', 'slt_fsp_on_login', 10, 2 );
+	add_action( 'admin_init', 'slt_fsp_check_password_expiry' );
+	add_action( 'admin_notices', 'slt_fsp_password_expiry_notice' );
 
 	if ( SLT_FSP_USE_ZXCVBN ) {
 
@@ -137,6 +173,60 @@ function slt_fsp_validate_strong_password( $errors, $user_data ) {
 	// Enforce?
 	if ( $enforce ) {
 
+		$min_length = apply_filters( 'slt_fsp_min_password_length', 15 );
+
+		if ( strlen( $password ) < $min_length ) {
+			$password_ok = false;
+			if ( is_wp_error( $errors ) ) {
+				$errors->add( 'pass', sprintf(
+					__( '<strong>ERROR</strong>: Password must be at least %d characters long.', 'slt-force-strong-passwords' ),
+					$min_length
+				) );
+			}
+			return $errors;
+		}
+
+		// Enforce minimum password age to prevent rapid cycling.
+		if ( $user_id ) {
+			$min_age_days  = apply_filters( 'slt_fsp_password_min_age_days', SLT_FSP_PASSWORD_MIN_AGE_DAYS );
+			$last_changed  = get_user_meta( $user_id, 'slt_fsp_password_last_changed', true );
+			if ( $last_changed && $min_age_days > 0 ) {
+				$earliest_change = $last_changed + ( $min_age_days * DAY_IN_SECONDS );
+				if ( time() < $earliest_change ) {
+					if ( is_wp_error( $errors ) ) {
+						$errors->add( 'pass', sprintf(
+							/* translators: %d: minimum number of days between password changes */
+							__( '<strong>ERROR</strong>: You must wait at least %d day(s) before changing your password again.', 'slt-force-strong-passwords' ),
+							$min_age_days
+						) );
+					}
+					return $errors;
+				}
+			}
+		}
+
+		// Check password reuse against current password and history.
+		if ( $user_id ) {
+			$current_user = get_userdata( $user_id );
+			if ( $current_user && wp_check_password( $password, $current_user->user_pass, $user_id ) ) {
+				if ( is_wp_error( $errors ) ) {
+					$errors->add( 'pass', __( '<strong>ERROR</strong>: You cannot reuse your current password. Please choose a different one.', 'slt-force-strong-passwords' ) );
+				}
+				return $errors;
+			}
+			if ( slt_fsp_is_password_in_history( $password, $user_id ) ) {
+				$max_history = apply_filters( 'slt_fsp_password_history_count', SLT_FSP_PASSWORD_HISTORY_COUNT );
+				if ( is_wp_error( $errors ) ) {
+					$errors->add( 'pass', sprintf(
+						/* translators: %d: number of previous passwords stored */
+						__( '<strong>ERROR</strong>: This password has been used recently. Please choose a password you haven\'t used in the last %d changes.', 'slt-force-strong-passwords' ),
+						$max_history
+					) );
+				}
+				return $errors;
+			}
+		}
+
 		// Using zxcvbn?
 		if ( SLT_FSP_USE_ZXCVBN ) {
 
@@ -198,6 +288,183 @@ function slt_fsp_enforce_for_user( $user_id ) {
 		}
 	}
 	return $enforce;
+}
+
+
+/**
+ * Store the current password hash in the user's password history.
+ *
+ * @since 1.9.0
+ * @param int $user_id The user ID.
+ */
+function slt_fsp_store_password_history( $user_id ) {
+	$user = get_userdata( $user_id );
+	if ( ! $user ) {
+		return;
+	}
+
+	$history = get_user_meta( $user_id, 'slt_fsp_password_history', true );
+	if ( ! is_array( $history ) ) {
+		$history = array();
+	}
+
+	$history[] = $user->user_pass;
+
+	$max_history = apply_filters( 'slt_fsp_password_history_count', SLT_FSP_PASSWORD_HISTORY_COUNT );
+	if ( count( $history ) > $max_history ) {
+		$history = array_slice( $history, -$max_history );
+	}
+
+	update_user_meta( $user_id, 'slt_fsp_password_history', $history );
+}
+
+
+/**
+ * Check if a password matches any entry in the user's password history.
+ *
+ * @since 1.9.0
+ * @param string $password  The plain-text password to check.
+ * @param int    $user_id   The user ID.
+ * @return boolean True if the password was found in history.
+ */
+function slt_fsp_is_password_in_history( $password, $user_id ) {
+	$history = get_user_meta( $user_id, 'slt_fsp_password_history', true );
+	if ( ! is_array( $history ) || empty( $history ) ) {
+		return false;
+	}
+
+	foreach ( $history as $old_hash ) {
+		if ( wp_check_password( $password, $old_hash, $user_id ) ) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
+/**
+ * Record password change after a password reset.
+ *
+ * @since 1.9.0
+ * @param WP_User $user     The user whose password was reset.
+ * @param string  $new_pass The new password (not used directly; hash is read from DB).
+ */
+function slt_fsp_after_password_reset( $user, $new_pass ) {
+	slt_fsp_store_password_history( $user->ID );
+	update_user_meta( $user->ID, 'slt_fsp_password_last_changed', time() );
+}
+
+
+/**
+ * Record password change after a profile update (only if password actually changed).
+ *
+ * @since 1.9.0
+ * @param int     $user_id       The user ID.
+ * @param WP_User $old_user_data The user data before the update.
+ */
+function slt_fsp_after_profile_update( $user_id, $old_user_data ) {
+	$user = get_userdata( $user_id );
+	if ( $user && $user->user_pass !== $old_user_data->user_pass ) {
+		slt_fsp_store_password_history( $user_id );
+		update_user_meta( $user_id, 'slt_fsp_password_last_changed', time() );
+	}
+}
+
+
+/**
+ * Initialize password tracking metadata when a new user is registered.
+ *
+ * @since 1.9.0
+ * @param int $user_id The newly registered user ID.
+ */
+function slt_fsp_on_user_register( $user_id ) {
+	update_user_meta( $user_id, 'slt_fsp_password_last_changed', time() );
+	slt_fsp_store_password_history( $user_id );
+}
+
+
+/**
+ * On login, set the password-last-changed timestamp if it doesn't exist yet.
+ * Handles existing users who were created before the plugin was activated.
+ *
+ * @since 1.9.0
+ * @param string  $user_login The username.
+ * @param WP_User $user       The authenticated user object.
+ */
+function slt_fsp_on_login( $user_login, $user ) {
+	$last_changed = get_user_meta( $user->ID, 'slt_fsp_password_last_changed', true );
+	if ( ! $last_changed ) {
+		update_user_meta( $user->ID, 'slt_fsp_password_last_changed', time() );
+	}
+}
+
+
+/**
+ * Check if a user's password has expired.
+ *
+ * @since 1.9.0
+ * @param int $user_id The user ID.
+ * @return boolean True if the password is expired.
+ */
+function slt_fsp_is_password_expired( $user_id ) {
+	if ( ! slt_fsp_enforce_for_user( $user_id ) ) {
+		return false;
+	}
+
+	$last_changed = get_user_meta( $user_id, 'slt_fsp_password_last_changed', true );
+	if ( ! $last_changed ) {
+		return false;
+	}
+
+	$expiry_days = apply_filters( 'slt_fsp_password_expiry_days', SLT_FSP_PASSWORD_EXPIRY_DAYS );
+	return time() > ( $last_changed + ( $expiry_days * DAY_IN_SECONDS ) );
+}
+
+
+/**
+ * Redirect users with expired passwords to their profile page.
+ *
+ * @since 1.9.0
+ */
+function slt_fsp_check_password_expiry() {
+	if ( ! is_user_logged_in() ) {
+		return;
+	}
+
+	$user_id = get_current_user_id();
+	if ( ! slt_fsp_is_password_expired( $user_id ) ) {
+		return;
+	}
+
+	global $pagenow;
+	$allowed_pages = array( 'profile.php', 'admin-ajax.php', 'admin-post.php' );
+	if ( in_array( $pagenow, $allowed_pages, true ) ) {
+		return;
+	}
+
+	if ( isset( $_GET['action'] ) && 'logout' === $_GET['action'] ) {
+		return;
+	}
+
+	wp_redirect( admin_url( 'profile.php?password_expired=1' ) );
+	exit;
+}
+
+
+/**
+ * Display an admin notice when the user's password has expired.
+ *
+ * @since 1.9.0
+ */
+function slt_fsp_password_expiry_notice() {
+	if ( ! isset( $_GET['password_expired'] ) && ! slt_fsp_is_password_expired( get_current_user_id() ) ) {
+		return;
+	}
+
+	echo '<div class="notice notice-error"><p>';
+	esc_html_e( 'Your password has expired. Please set a new password below.', 'slt-force-strong-passwords' );
+	echo '</p></div>';
 }
 
 
