@@ -1,12 +1,12 @@
 === Force Strong Passwords ===
-Contributors: boogah, gyrus, simonwheatley, sparanoid, jpry, zyphonic
+Contributors: boogah, gyrus, simonwheatley, sparanoid, jpry, zyphonic, Medico Digital
 Donate link: https://www.girldevelopit.com/donate
 Tags: passwords, security, users, profile
 Requires at least: 3.7
 Tested up to: 4.9
 Stable tag: 1.8
 
-Forces privileged users to set a strong password.
+Forces users to set a strong password.
 
 == Description ==
 The user profile editor includes a JavaScript-powered password strength indicator. However, there is nothing currently built into WordPress core to prevent users from entering weak passwords. Users changing their password to something weak is one of the most vulnerable aspects of a WordPress installation.
@@ -53,88 +53,3 @@ The default array includes: `subscriber` and `contributor`.
 == Installation ==
 1. Upload the `force-strong-passwords` directory into the `/wp-content/plugins/` directory.
 2. Activate the plugin through the 'Plugins' menu in WordPress.
-
-== Changelog ==
-
-= 1.8 =
-* More code tidying.
-* Will now return unminified version of JavaScript if `SCRIPT_DEBUG` is set to 'true'.
-
-= 1.7 =
-* Work on tidying up code.
-* Update hint link to use official zxcvbn test site. (thanks [EmTeedee](https://github.com/EmTeedee)!)
-
-= 1.6.5 =
-* Fix problem with non wp-error object:$errors (thanks [Terrance Orletsky](https://github.com/EarthmanWeb)!)
-
-= 1.6.4 =
-* Add a new `FSP_PLUGIN_VERSION` constant
-
-= 1.6.3 =
-* Updated `wp_enqueue_script` version argument
-
-= 1.6.2 =
-* Fixed issue where password resets weren't working
-* Tested to WordPress 4.3.1
-
-= 1.6.1 =
-* Fixing the i18n fix
-
-= 1.6 =
-* I18n fix courtesy of [John Dittmar](https://github.com/JohnDittmar/)
-* Added German translation (thanks [Becki Beckmann](https://github.com/beckspaced)!)
-* Added Brazilian Portuguese translation (thanks [Alexandre Kozoubsky](https://github.com/akozoubsky)!)
-* Documentation improvements
-* Tested to WordPress 4.3
-
-= 1.5.2 =
-* Clean up documentation
-* Test for WordPress 4.2.2
-* Change donation link to [Girl Develop It](https://www.girldevelopit.com)
-
-= 1.5.1 =
-* Enforce strong passwords on password reset form (thanks [Steve Bruner](https://github.com/sbruner)!)
-
-= 1.5 =
-* Added French translation (thanks [Damien Piquet](https://github.com/dpiquet)!)
-* Added input sanitization (thanks [Jenny Wong](https://github.com/missjwo)!)
-
-= 1.4 =
-* Enforce on multisite network admin screens (thanks [Damien Piquet](https://github.com/dpiquet)!)
-
-= 1.3.4 =
-* Updated Chinese Simplified Language translation (thanks sparanoid!)
-
-= 1.3.3 =
-* zxcvbn password hints.
-* Now allows for non-Latin character set encoding when comparing zxcvbn meter result (thanks jpry!)
-
-= 1.3.2 =
-* Added Serbo-Croatian translation (thanks Borisa Djuraskovic!)
-
-= 1.3.1 =
-* Fixed so zxcvbn check respects localization (thanks lakrisgubben!)
-
-= 1.3 =
-* Switched to JS-aided enforcement of new zxcvbn check in WP 3.7+
-* Added Japanese translation (thanks Fumito Mizuno!)
-
-= 1.2.2 =
-* Added Chinese Simplified Language support (thanks sparanoid!)
-
-= 1.2.1 =
-* Fixed bug that triggered enforcement on profile update even when no password is being set
-
-= 1.2 =
-* Added `slt_fsp_error_message` filter to customize error message
-* Deprecated `SLT_FSP_CAPS_CHECK` constant; added `slt_fsp_caps_check` filter
-* Added `slt_fsp_weak_roles` filter
-
-= 1.1 =
-* Used new `validate_password_reset` 3.5 hook to implement checking on reset password form (thanks simonwheatley!)
-* PHPDoc for callable functions
-* Improved function naming
-* Added control over capabilities that trigger strong password enforcement via `SLT_FSP_CAPS_CHECK` constant
-
-= 1.0 =
-* First version

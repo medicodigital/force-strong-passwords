@@ -1,20 +1,20 @@
 <?php
 /**
- * Plugin Name:  Force Strong Passwords
- * Plugin URI:   https://github.com/boogah/force-strong-passwords/
- * Description:  Forces privileged users to set a strong password.
- * Version:      1.8.0
- * Author:       Jason Cosper
- * Author URI:   http://jasoncosper.com/
+ * Plugin Name:  Medico Digital - Enhanced Security
+ * Plugin URI:   https://github.com/MedicoDigital/medico-digital-enhanced-security/
+ * Description:  Forces users to set a strong password.
+ * Version:      1.0.0
+ * Author:       Medico Digital
+ * Author URI:   http://www.medicodigital.co.uk/
  * License:      GPLv3
  * License URI:  https://www.gnu.org/licenses/gpl-3.0.txt
- * Text Domain:  force-strong-passwords
+ * Text Domain:  medico-digital-enhanced-security
  * Domain Path:  /languages
  *
- * @link         https://jasoncosper.com/
+ * @link         https://www.medicodigital.co.uk/
  * @package      WordPress
- * @author       Jason Cosper
- * @version      1.8.0
+ * @author       Medico Digital
+ * @version      1.0.0
  */
 
 global $wp_version;
@@ -144,6 +144,11 @@ function slt_fsp_init() {
 		add_action( 'login_enqueue_scripts', 'slt_fsp_enqueue_force_zxcvbn_script' );
 
 	}
+
+	// Security hardening hooks.
+	slt_fsp_maybe_sanitise_inputs();
+	add_action( 'wp_head', 'slt_fsp_inject_js_safe_data', 1 );
+	add_action( 'init', 'slt_fsp_add_security_headers' );
 
 }
 
@@ -392,6 +397,53 @@ function slt_fsp_register_settings() {
 			'description' => __( 'Minimum days a user must wait before changing their password again. Prevents rapid cycling.', 'slt-force-strong-passwords' ),
 		)
 	);
+
+	// --- Security Hardening section ---
+	add_settings_section(
+		'slt_fsp_security_hardening',
+		__( 'Security Hardening', 'slt-force-strong-passwords' ),
+		'slt_fsp_hardening_section_cb',
+		'slt-force-strong-passwords'
+	);
+
+	add_settings_field(
+		'enable_input_sanitise',
+		__( 'Enable Input Sanitisation', 'slt-force-strong-passwords' ),
+		'slt_fsp_field_checkbox_cb',
+		'slt-force-strong-passwords',
+		'slt_fsp_security_hardening',
+		array(
+			'key'     => 'enable_input_sanitise',
+			'default' => 0,
+			'label'   => __( 'Sanitize incoming $_GET and $_POST values early (recommended). Output escaping is still required in templates.', 'slt-force-strong-passwords' ),
+		)
+	);
+
+	add_settings_field(
+		'expose_safe_request_uri',
+		__( 'Expose Safe Request URI', 'slt-force-strong-passwords' ),
+		'slt_fsp_field_checkbox_cb',
+		'slt-force-strong-passwords',
+		'slt_fsp_security_hardening',
+		array(
+			'key'     => 'expose_safe_request_uri',
+			'default' => 0,
+			'label'   => __( 'Output a JSON-encoded window.fspSiteData.safeRequestUri in the head for templates to use instead of echoing raw $_SERVER[\'REQUEST_URI\'].', 'slt-force-strong-passwords' ),
+		)
+	);
+
+	add_settings_field(
+		'add_security_headers',
+		__( 'Add Security Headers', 'slt-force-strong-passwords' ),
+		'slt_fsp_field_checkbox_cb',
+		'slt-force-strong-passwords',
+		'slt_fsp_security_hardening',
+		array(
+			'key'     => 'add_security_headers',
+			'default' => 0,
+			'label'   => __( 'Add modern HTTP security headers (HSTS, CSP frame-ancestors, X-Content-Type-Options, etc.) and disable the deprecated X-XSS-Protection header.', 'slt-force-strong-passwords' ),
+		)
+	);
 }
 
 
@@ -402,6 +454,16 @@ function slt_fsp_register_settings() {
  */
 function slt_fsp_policy_section_cb() {
 	echo '<p>' . esc_html__( 'Configure password strength and lifecycle requirements.', 'slt-force-strong-passwords' ) . '</p>';
+}
+
+
+/**
+ * Security hardening section description callback.
+ *
+ * @since 1.9.0
+ */
+function slt_fsp_hardening_section_cb() {
+	echo '<p>' . esc_html__( 'Configure input sanitisation, safe data exposure, and HTTP security headers.', 'slt-force-strong-passwords' ) . '</p>';
 }
 
 
@@ -453,7 +515,15 @@ function slt_fsp_field_checkbox_cb( $args ) {
 function slt_fsp_sanitize_settings( $input ) {
 	$sanitized = array();
 
-	$sanitized['enforce_for_all_users'] = ! empty( $input['enforce_for_all_users'] ) ? 1 : 0;
+	$checkboxes = array(
+		'enforce_for_all_users',
+		'enable_input_sanitise',
+		'expose_safe_request_uri',
+		'add_security_headers',
+	);
+	foreach ( $checkboxes as $cb ) {
+		$sanitized[ $cb ] = ! empty( $input[ $cb ] ) ? 1 : 0;
+	}
 
 	$fields = array(
 		'min_password_length'    => array( 'min' => 8,  'max' => 128, 'default' => 15 ),
@@ -727,6 +797,102 @@ function slt_fsp_password_expiry_notice() {
 	echo '<div class="notice notice-error"><p>';
 	esc_html_e( 'Your password has expired. Please set a new password below.', 'slt-force-strong-passwords' );
 	echo '</p></div>';
+}
+
+
+/**
+ * Sanitize incoming $_GET and $_POST arrays early.
+ *
+ * Output-context escaping is still required when rendering data.
+ *
+ * @since 1.9.0
+ */
+function slt_fsp_maybe_sanitise_inputs() {
+	if ( ! (int) slt_fsp_get_option( 'enable_input_sanitise', 0 ) ) {
+		return;
+	}
+
+	$_GET  = slt_fsp_recursive_sanitize_input( $_GET );
+	$_POST = slt_fsp_recursive_sanitize_input( $_POST );
+}
+
+
+/**
+ * Recursively sanitize an input array.
+ *
+ * @since 1.9.0
+ * @param mixed $data Input data.
+ * @return mixed Sanitized data.
+ */
+function slt_fsp_recursive_sanitize_input( $data ) {
+	if ( is_array( $data ) ) {
+		$out = array();
+		foreach ( $data as $k => $v ) {
+			$safe_k        = is_string( $k ) ? sanitize_key( $k ) : $k;
+			$out[ $safe_k ] = slt_fsp_recursive_sanitize_input( $v );
+		}
+		return $out;
+	}
+
+	if ( is_scalar( $data ) ) {
+		return sanitize_text_field( trim( (string) $data ) );
+	}
+
+	return $data;
+}
+
+
+/**
+ * Inject a JSON-encoded JS object into the page head so themes can safely
+ * reference the request URI without echoing raw $_SERVER values.
+ *
+ * @since 1.9.0
+ */
+function slt_fsp_inject_js_safe_data() {
+	if ( ! (int) slt_fsp_get_option( 'expose_safe_request_uri', 0 ) ) {
+		return;
+	}
+
+	$data = array(
+		'safeRequestUri' => isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '',
+		'homeUrl'        => home_url(),
+	);
+
+	$json = wp_json_encode( $data );
+	if ( false === $json ) {
+		$json = '{}';
+	}
+
+	echo "<script id=\"fsp-site-data\">window.fspSiteData = {$json};</script>\n";
+}
+
+
+/**
+ * Add modern HTTP security headers.
+ *
+ * Explicitly disables the deprecated X-XSS-Protection header and sets
+ * best-practice headers for content-type sniffing, framing, referrer
+ * policy, HSTS, and a minimal CSP frame-ancestors directive.
+ *
+ * @since 1.9.0
+ */
+function slt_fsp_add_security_headers() {
+	if ( ! (int) slt_fsp_get_option( 'add_security_headers', 0 ) ) {
+		return;
+	}
+
+	if ( function_exists( 'header_remove' ) ) {
+		header_remove( 'X-XSS-Protection' );
+	}
+	header( 'X-XSS-Protection: 0' );
+	header( 'X-Content-Type-Options: nosniff' );
+	header( 'X-Frame-Options: SAMEORIGIN' );
+	header( 'Referrer-Policy: strict-origin' );
+	header( 'Cross-Origin-Opener-Policy: same-origin' );
+	header( 'Cross-Origin-Resource-Policy: same-origin' );
+	header( 'Permissions-Policy: accelerometer=(), camera=(), microphone=(), geolocation=(), usb=()' );
+	header( 'Strict-Transport-Security: max-age=31536000; includeSubDomains' );
+	header( "Content-Security-Policy: frame-ancestors 'self'" );
 }
 
 
