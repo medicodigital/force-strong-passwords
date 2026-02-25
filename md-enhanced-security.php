@@ -724,7 +724,11 @@ function mdes_on_user_register( $user_id ) {
 function mdes_on_login( $user_login, $user ) {
 	$last_changed = get_user_meta( $user->ID, 'mdes_password_last_changed', true );
 	if ( ! $last_changed ) {
-		update_user_meta( $user->ID, 'mdes_password_last_changed', time() );
+		// Use epoch timestamp 1 (not 0, which is falsy) so the password is
+		// immediately considered expired and the minimum-age gate doesn't block
+		// the user from setting a new password right away.
+		update_user_meta( $user->ID, 'mdes_password_last_changed', 1 );
+		mdes_store_password_history( $user->ID );
 	}
 }
 
