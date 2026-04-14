@@ -156,7 +156,9 @@ function mdes_init() {
 
 	// SameSite cookie attribute.
 	add_filter( 'wp_samesite_cookies', 'mdes_samesite_cookie_attribute' );
-	add_action( 'wp_login', 'mdes_apply_samesite_to_auth_cookies', 1, 2 );
+	add_action( 'set_auth_cookie',     'mdes_samesite_capture_auth_cookie',      PHP_INT_MAX - 1, 6 );
+	add_action( 'set_logged_in_cookie', 'mdes_samesite_capture_logged_in_cookie', PHP_INT_MAX - 1, 6 );
+	add_filter( 'send_auth_cookies',   'mdes_samesite_send_cookies',              PHP_INT_MAX, 6 );
 
 	// Concurrent session management.
 	add_action( 'set_auth_cookie', 'mdes_capture_new_session_token', 10, 6 );
@@ -1188,13 +1190,20 @@ function mdes_send_new_session_notification( $user, $current_ip, $current_ua, $o
 }
 
 
+// Queue used to pass cookie parameters from the set_auth_cookie /
+// set_logged_in_cookie actions to the send_auth_cookies filter.
+// The actions fire just before setcookie() would be called; the filter
+// fires immediately after, giving us the opportunity to suppress
+// WordPress's setcookie() calls and issue our own with SameSite=Lax.
+$mdes_samesite_cookie_queue = array();
+
+
 /**
  * Return the SameSite attribute value for WordPress authentication cookies.
  *
  * Applied via the wp_samesite_cookies filter introduced in WordPress 5.9.
- * On sites running WP < 5.9 or PHP < 7.3, the filter is not available and
- * mdes_apply_samesite_to_auth_cookies() patches the Set-Cookie headers
- * directly after the login action instead.
+ * On older WordPress / PHP the filter has no effect; SameSite is added
+ * instead by the send_auth_cookies intercept below.
  *
  * @since 1.9.1
  * @param string $samesite Current SameSite value (WP core default: 'Lax').
@@ -1206,58 +1215,129 @@ function mdes_samesite_cookie_attribute( $samesite ) {
 
 
 /**
- * Fallback for WordPress < 5.9 / PHP < 7.3: patch the queued Set-Cookie
- * response headers for WordPress authentication cookies to include SameSite=Lax.
+ * Capture the authentication cookie parameters before WordPress calls
+ * setcookie() so that mdes_samesite_send_cookies() can re-issue the cookie
+ * with SameSite=Lax.
  *
- * Hooked to wp_login at priority 1 so it runs immediately after
- * wp_set_auth_cookie() has called setcookie() — at which point the
- * Set-Cookie headers are queued but no response body has been produced yet,
- * so headers can still be modified.
- *
- * All existing Set-Cookie headers are captured, removed, and re-queued.
- * Only WordPress authentication cookies that lack a SameSite directive have
- * '; SameSite=Lax' appended; all other cookies are restored unchanged.
+ * Hooked to set_auth_cookie at priority PHP_INT_MAX - 1 to run after any
+ * other plugin that might modify the cookie value.
  *
  * @since 1.9.1
- * @param string  $user_login Authenticated username.
- * @param WP_User $user       The authenticated user object.
+ * @param string $auth_cookie  Cookie value.
+ * @param int    $expire       Cookie expiry timestamp (0 = session cookie).
+ * @param int    $expiration   Session expiry timestamp.
+ * @param int    $user_id      User ID.
+ * @param string $scheme       'auth' (HTTP) or 'secure_auth' (HTTPS).
+ * @param string $token        Session token (not needed here).
  */
-function mdes_apply_samesite_to_auth_cookies( $user_login, $user ) {
-	if ( headers_sent() ) {
-		return;
-	}
+function mdes_samesite_capture_auth_cookie( $auth_cookie, $expire, $expiration, $user_id, $scheme, $token ) {
+	global $mdes_samesite_cookie_queue;
 
-	$wp_auth_prefixes = array(
-		'wordpress_logged_in_',
-		'wordpress_sec_',
-		'wordpress_',
+	$secure = ( 'secure_auth' === $scheme );
+
+	$mdes_samesite_cookie_queue['auth'] = array(
+		'name'   => $secure ? SECURE_AUTH_COOKIE : AUTH_COOKIE,
+		'value'  => $auth_cookie,
+		'expire' => $expire,
+		'path'   => ADMIN_COOKIE_PATH,
+		'domain' => defined( 'COOKIE_DOMAIN' ) ? COOKIE_DOMAIN : '',
+		'secure' => $secure,
 	);
+}
 
-	$existing_headers = headers_list();
-	header_remove( 'Set-Cookie' );
 
-	foreach ( $existing_headers as $header ) {
-		if ( 0 !== stripos( $header, 'Set-Cookie:' ) ) {
-			continue;
-		}
+/**
+ * Capture the logged-in cookie parameters before WordPress calls setcookie().
+ *
+ * Hooked to set_logged_in_cookie at priority PHP_INT_MAX - 1.
+ *
+ * @since 1.9.1
+ * @param string $logged_in_cookie  Cookie value.
+ * @param int    $expire            Cookie expiry timestamp (0 = session cookie).
+ * @param int    $expiration        Session expiry timestamp.
+ * @param int    $user_id           User ID.
+ * @param string $scheme            Always 'logged_in'.
+ * @param string $token             Session token (not needed here).
+ */
+function mdes_samesite_capture_logged_in_cookie( $logged_in_cookie, $expire, $expiration, $user_id, $scheme, $token ) {
+	global $mdes_samesite_cookie_queue;
 
-		$cookie_str  = trim( substr( $header, strlen( 'Set-Cookie:' ) ) );
-		$cookie_name = strtolower( trim( explode( '=', $cookie_str, 2 )[0] ) );
+	$mdes_samesite_cookie_queue['logged_in'] = array(
+		'name'   => LOGGED_IN_COOKIE,
+		'value'  => $logged_in_cookie,
+		'expire' => $expire,
+		'path'   => defined( 'COOKIEPATH' ) ? COOKIEPATH : '/',
+		'domain' => defined( 'COOKIE_DOMAIN' ) ? COOKIE_DOMAIN : '',
+		'secure' => is_ssl(),
+	);
+}
 
-		$is_wp_auth = false;
-		foreach ( $wp_auth_prefixes as $prefix ) {
-			if ( 0 === strpos( $cookie_name, $prefix ) ) {
-				$is_wp_auth = true;
-				break;
-			}
-		}
 
-		if ( $is_wp_auth && false === stripos( $cookie_str, 'samesite' ) ) {
-			header( 'Set-Cookie: ' . $cookie_str . '; SameSite=Lax', false );
+/**
+ * Intercept WordPress's cookie-sending, suppress the default setcookie()
+ * calls, and re-issue both auth cookies with SameSite=Lax.
+ *
+ * Hooked to send_auth_cookies at priority PHP_INT_MAX so it runs after
+ * all other plugins. Returns false only when the queue is populated and the
+ * incoming $send value is true, preserving the intent of any other plugin
+ * that has already suppressed cookie-sending.
+ *
+ * For PHP 7.3+ the native setcookie() array-options format is used.
+ * For PHP < 7.3 the Set-Cookie header is constructed manually via header().
+ * Both paths produce an identical cookie with HttpOnly and SameSite=Lax.
+ *
+ * @since 1.9.1
+ * @param bool   $send       Whether WordPress intends to send cookies.
+ * @param int    $expire     Cookie expiry timestamp.
+ * @param int    $expiration Session expiry timestamp.
+ * @param int    $user_id    User ID.
+ * @param string $scheme     Auth scheme.
+ * @param string $token      Session token.
+ * @return bool False to suppress WordPress's own setcookie() calls after
+ *              we have set the cookies ourselves; otherwise the original value.
+ */
+function mdes_samesite_send_cookies( $send, $expire, $expiration, $user_id, $scheme, $token ) {
+	global $mdes_samesite_cookie_queue;
+
+	// Respect any other plugin that has already suppressed cookie-sending.
+	if ( ! $send || empty( $mdes_samesite_cookie_queue ) ) {
+		return $send;
+	}
+
+	foreach ( $mdes_samesite_cookie_queue as $cookie ) {
+		if ( PHP_VERSION_ID >= 70300 ) {
+			setcookie( $cookie['name'], $cookie['value'], array(
+				'expires'  => $cookie['expire'],
+				'path'     => $cookie['path'],
+				'domain'   => $cookie['domain'],
+				'secure'   => $cookie['secure'],
+				'httponly' => true,
+				'samesite' => 'Lax',
+			) );
 		} else {
-			header( 'Set-Cookie: ' . $cookie_str, false );
+			// PHP < 7.3: construct the Set-Cookie header string manually.
+			$parts = array( rawurlencode( $cookie['name'] ) . '=' . rawurlencode( $cookie['value'] ) );
+			if ( $cookie['expire'] ) {
+				$parts[] = 'expires=' . gmdate( 'D, d-M-Y H:i:s T', $cookie['expire'] );
+				$parts[] = 'Max-Age=' . max( 0, $cookie['expire'] - time() );
+			}
+			$parts[] = 'path=' . $cookie['path'];
+			if ( $cookie['domain'] ) {
+				$parts[] = 'domain=' . $cookie['domain'];
+			}
+			if ( $cookie['secure'] ) {
+				$parts[] = 'Secure';
+			}
+			$parts[] = 'HttpOnly';
+			$parts[] = 'SameSite=Lax';
+			header( 'Set-Cookie: ' . implode( '; ', $parts ), false );
 		}
 	}
+
+	$mdes_samesite_cookie_queue = array();
+
+	// Tell WordPress not to call setcookie() — we have already done it.
+	return false;
 }
 
 
