@@ -3,7 +3,7 @@
  * Plugin Name:  Medico Digital - Enhanced Security
  * Plugin URI:   https://github.com/MedicoDigital/medico-digital-enhanced-security/
  * Description:  Forces users to set a strong password.
- * Version:      1.9.0
+ * Version:      1.9.1
  * Author:       Medico Digital
  * Author URI:   http://www.medicodigital.co.uk/
  * License:      GPLv3
@@ -14,7 +14,7 @@
  * @link         https://www.medicodigital.co.uk/
  * @package      WordPress
  * @author       Medico Digital
- * @version      1.9.0
+ * @version      1.9.1
  */
 
 global $wp_version;
@@ -149,6 +149,18 @@ function mdes_init() {
 	mdes_maybe_sanitise_inputs();
 	add_action( 'wp_head', 'mdes_inject_js_safe_data', 1 );
 	add_action( 'init', 'mdes_add_security_headers' );
+
+	// User enumeration prevention.
+	add_filter( 'login_errors', 'mdes_generic_login_error' );
+	add_action( 'lostpassword_post', 'mdes_prevent_lostpassword_enumeration', 10, 2 );
+
+	// SameSite cookie attribute.
+	add_filter( 'wp_samesite_cookies', 'mdes_samesite_cookie_attribute' );
+	add_action( 'wp_login', 'mdes_apply_samesite_to_auth_cookies', 1, 2 );
+
+	// Concurrent session management.
+	add_action( 'set_auth_cookie', 'mdes_capture_new_session_token', 10, 6 );
+	add_action( 'wp_login', 'mdes_enforce_concurrent_session_policy', 10, 2 );
 
 }
 
@@ -444,6 +456,40 @@ function mdes_register_settings() {
 			'label'   => __( 'Add modern HTTP security headers (HSTS, CSP frame-ancestors, X-Content-Type-Options, etc.) and disable the deprecated X-XSS-Protection header.', 'mdes-force-strong-passwords' ),
 		)
 	);
+
+	// --- Session Management section ---
+	add_settings_section(
+		'mdes_session_management',
+		__( 'Session Management', 'mdes-force-strong-passwords' ),
+		'mdes_session_section_cb',
+		'mdes-force-strong-passwords'
+	);
+
+	add_settings_field(
+		'restrict_concurrent_sessions',
+		__( 'Restrict Concurrent Sessions', 'mdes-force-strong-passwords' ),
+		'mdes_field_checkbox_cb',
+		'mdes-force-strong-passwords',
+		'mdes_session_management',
+		array(
+			'key'     => 'restrict_concurrent_sessions',
+			'default' => 1,
+			'label'   => __( 'Limit each account to one active session. When a new login occurs all other sessions for that user are immediately invalidated.', 'mdes-force-strong-passwords' ),
+		)
+	);
+
+	add_settings_field(
+		'notify_new_session',
+		__( 'Notify on New Session', 'mdes-force-strong-passwords' ),
+		'mdes_field_checkbox_cb',
+		'mdes-force-strong-passwords',
+		'mdes_session_management',
+		array(
+			'key'     => 'notify_new_session',
+			'default' => 1,
+			'label'   => __( 'Email the account holder when a new login is detected from a different IP address or browser than an existing active session.', 'mdes-force-strong-passwords' ),
+		)
+	);
 }
 
 
@@ -464,6 +510,16 @@ function mdes_policy_section_cb() {
  */
 function mdes_hardening_section_cb() {
 	echo '<p>' . esc_html__( 'Configure input sanitisation, safe data exposure, and HTTP security headers.', 'mdes-force-strong-passwords' ) . '</p>';
+}
+
+
+/**
+ * Session management section description callback.
+ *
+ * @since 1.9.1
+ */
+function mdes_session_section_cb() {
+	echo '<p>' . esc_html__( 'Control concurrent login sessions and notify users of new logins from unrecognised devices.', 'mdes-force-strong-passwords' ) . '</p>';
 }
 
 
@@ -520,6 +576,8 @@ function mdes_sanitize_settings( $input ) {
 		'enable_input_sanitise',
 		'expose_safe_request_uri',
 		'add_security_headers',
+		'restrict_concurrent_sessions',
+		'notify_new_session',
 	);
 	foreach ( $checkboxes as $cb ) {
 		$sanitized[ $cb ] = ! empty( $input[ $cb ] ) ? 1 : 0;
@@ -805,6 +863,46 @@ function mdes_password_expiry_notice() {
 
 
 /**
+ * Prevent user enumeration on the login page by returning a generic error
+ * message regardless of whether the username exists or the password is wrong.
+ *
+ * Replaces WordPress's default messages such as:
+ *   "The username X is not registered on this site."
+ *   "The password you entered for the username X is incorrect."
+ *
+ * @since 1.9.1
+ * @param string $error The error message HTML produced by WordPress.
+ * @return string A generic error message that does not reveal account existence.
+ */
+function mdes_generic_login_error( $error ) {
+	return '<strong>' . esc_html__( 'ERROR', 'mdes-force-strong-passwords' ) . '</strong>: '
+		. esc_html__( 'Invalid username or password.', 'mdes-force-strong-passwords' );
+}
+
+
+/**
+ * Prevent user enumeration on the lost password page by redirecting to the
+ * confirmation screen even when the submitted username or email does not exist.
+ *
+ * Without this, WordPress shows an error for unknown accounts and redirects
+ * for valid ones — the differing HTTP responses reveal account existence.
+ * This hook fires after the user lookup inside retrieve_password(), so when
+ * $user_data is false (no account found) we redirect to the same success URL
+ * that a valid submission would produce, without sending any email.
+ *
+ * @since 1.9.1
+ * @param WP_Error        $errors    Errors accumulated so far (e.g. invalidcombo).
+ * @param WP_User|false   $user_data The located user object, or false if not found.
+ */
+function mdes_prevent_lostpassword_enumeration( $errors, $user_data ) {
+	if ( ! $user_data ) {
+		wp_safe_redirect( add_query_arg( 'checkemail', 'confirm', wp_login_url() ) );
+		exit;
+	}
+}
+
+
+/**
  * Sanitize incoming $_GET and $_POST arrays early.
  *
  * Output-context escaping is still required when rendering data.
@@ -897,6 +995,269 @@ function mdes_add_security_headers() {
 	header( 'Permissions-Policy: accelerometer=(), camera=(), microphone=(), geolocation=(), usb=()' );
 	header( 'Strict-Transport-Security: max-age=31536000; includeSubDomains' );
 	header( "Content-Security-Policy: frame-ancestors 'self'" );
+}
+
+
+// Module-level variable used to pass the new session token from the
+// set_auth_cookie action (which fires before setcookie()) to the wp_login
+// action (which fires after). $_COOKIE is not usable at wp_login time because
+// the browser has not yet received and returned the newly set cookie.
+$mdes_new_session_token = null;
+
+
+/**
+ * Capture the new session token when WordPress sets an authentication cookie.
+ *
+ * Stores the token in $mdes_new_session_token for use by
+ * mdes_enforce_concurrent_session_policy(), which runs on the wp_login action
+ * that fires immediately afterwards.
+ *
+ * @since 1.9.1
+ * @param string $auth_cookie  Authentication cookie value (not used here).
+ * @param int    $expire       Cookie expiry timestamp (not used here).
+ * @param int    $expiration   Session expiry timestamp (not used here).
+ * @param int    $user_id      User ID (not used here).
+ * @param string $scheme       Auth scheme: 'auth' or 'secure_auth' (not used here).
+ * @param string $token        The raw session token being stored in the cookie.
+ */
+function mdes_capture_new_session_token( $auth_cookie, $expire, $expiration, $user_id, $scheme, $token ) {
+	global $mdes_new_session_token;
+	$mdes_new_session_token = $token;
+}
+
+
+/**
+ * Enforce the concurrent session policy and send new-session notifications.
+ *
+ * Runs on wp_login immediately after wp_set_auth_cookie() has created the
+ * new session and set the cookie response headers.
+ *
+ * Notification logic:
+ *   Fires when notify_new_session is enabled AND there is at least one
+ *   other active session whose recorded IP address or user-agent differs
+ *   from the current login. The check runs before destroy_others() so the
+ *   other sessions are still available to inspect.
+ *
+ * Session restriction logic:
+ *   When restrict_concurrent_sessions is enabled, every session belonging
+ *   to this user other than the newly created one is immediately invalidated
+ *   via WP_Session_Tokens::destroy_others(). This is the WordPress-native
+ *   API used by the "Log Out Everywhere Else" feature in wp-admin and is safe
+ *   to call with any active session state.
+ *
+ * Scope: applies only to cookie-based WordPress sessions. REST API
+ * application passwords and XML-RPC credentials use a separate auth path
+ * and are not affected.
+ *
+ * @since 1.9.1
+ * @param string  $user_login The authenticated username.
+ * @param WP_User $user       The authenticated user object.
+ */
+function mdes_enforce_concurrent_session_policy( $user_login, $user ) {
+	global $mdes_new_session_token;
+
+	if ( empty( $mdes_new_session_token ) ) {
+		return;
+	}
+
+	$manager      = WP_Session_Tokens::get_instance( $user->ID );
+	$all_sessions = $manager->get_all();
+	$new_verifier = hash( 'sha256', $mdes_new_session_token );
+
+	// ---- Notification ----
+	if ( (int) mdes_get_option( 'notify_new_session', 1 ) ) {
+		$current_ip = isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '';
+		$current_ua = isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ) : '';
+
+		$other_sessions = array();
+		foreach ( $all_sessions as $verifier => $session ) {
+			if ( $verifier !== $new_verifier ) {
+				$other_sessions[ $verifier ] = $session;
+			}
+		}
+
+		if ( ! empty( $other_sessions ) ) {
+			$different_context = false;
+			foreach ( $other_sessions as $session ) {
+				$session_ip = isset( $session['ip'] ) ? $session['ip'] : '';
+				$session_ua = isset( $session['ua'] ) ? $session['ua'] : '';
+				if ( $session_ip !== $current_ip || $session_ua !== $current_ua ) {
+					$different_context = true;
+					break;
+				}
+			}
+
+			if ( $different_context ) {
+				mdes_send_new_session_notification( $user, $current_ip, $current_ua, count( $other_sessions ) );
+			}
+		}
+	}
+
+	// ---- Session restriction ----
+	if ( (int) mdes_get_option( 'restrict_concurrent_sessions', 1 ) ) {
+		$manager->destroy_others( $mdes_new_session_token );
+	}
+}
+
+
+/**
+ * Send an email notification to the user when a new session is detected from
+ * a different IP address or browser than an existing active session.
+ *
+ * The email advises the user to change their password and contact the
+ * administrator if they do not recognise the activity.
+ *
+ * @since 1.9.1
+ * @param WP_User $user            The user who just logged in.
+ * @param string  $current_ip      IP address of the new login.
+ * @param string  $current_ua      User-agent string of the new login.
+ * @param int     $other_count     Number of other active sessions at the time of login.
+ */
+function mdes_send_new_session_notification( $user, $current_ip, $current_ua, $other_count ) {
+	if ( empty( $user->user_email ) ) {
+		return;
+	}
+
+	$site_name  = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
+	$login_time = gmdate( 'Y-m-d H:i:s T' );
+
+	// Extract a human-readable browser/OS hint from the UA string without
+	// relying on an external library. Covers the most common tokens.
+	$browser = __( 'Unknown browser', 'mdes-force-strong-passwords' );
+	$ua_map  = array(
+		'Edg'     => 'Microsoft Edge',
+		'OPR'     => 'Opera',
+		'Chrome'  => 'Chrome',
+		'Firefox' => 'Firefox',
+		'Safari'  => 'Safari',
+		'MSIE'    => 'Internet Explorer',
+		'Trident' => 'Internet Explorer',
+	);
+	foreach ( $ua_map as $token => $label ) {
+		if ( false !== strpos( $current_ua, $token ) ) {
+			$browser = $label;
+			break;
+		}
+	}
+
+	/* translators: %s: site name */
+	$subject = sprintf( __( '[%s] New login detected from an unrecognised device', 'mdes-force-strong-passwords' ), $site_name );
+
+	$message  = sprintf(
+		/* translators: 1: display name, 2: site name */
+		__( 'Hello %1$s,', 'mdes-force-strong-passwords' ),
+		$user->display_name
+	) . "\n\n";
+
+	$message .= sprintf(
+		/* translators: %s: site name */
+		__( 'A new login to your account on %s was detected from a device or location that differs from your existing active session(s).', 'mdes-force-strong-passwords' ),
+		$site_name
+	) . "\n\n";
+
+	$message .= __( 'Login details:', 'mdes-force-strong-passwords' ) . "\n";
+	/* translators: %s: date and time string */
+	$message .= sprintf( __( '  Date/time: %s', 'mdes-force-strong-passwords' ), $login_time ) . "\n";
+	/* translators: %s: IP address */
+	$message .= sprintf( __( '  IP address: %s', 'mdes-force-strong-passwords' ), $current_ip ) . "\n";
+	/* translators: %s: browser name */
+	$message .= sprintf( __( '  Browser:    %s', 'mdes-force-strong-passwords' ), $browser ) . "\n\n";
+
+	if ( $other_count > 0 ) {
+		$message .= sprintf(
+			/* translators: %d: number of sessions invalidated */
+			_n(
+				'%d other active session was terminated as part of the concurrent session policy.',
+				'%d other active sessions were terminated as part of the concurrent session policy.',
+				$other_count,
+				'mdes-force-strong-passwords'
+			),
+			$other_count
+		) . "\n\n";
+	}
+
+	$message .= __( 'If this was you, no action is required.', 'mdes-force-strong-passwords' ) . "\n\n";
+	$message .= __( 'If you do not recognise this activity, please change your password immediately and contact the site administrator.', 'mdes-force-strong-passwords' ) . "\n\n";
+	$message .= sprintf(
+		/* translators: %s: password reset URL */
+		__( 'Change your password: %s', 'mdes-force-strong-passwords' ),
+		wp_lostpassword_url()
+	) . "\n";
+
+	wp_mail( $user->user_email, $subject, $message );
+}
+
+
+/**
+ * Return the SameSite attribute value for WordPress authentication cookies.
+ *
+ * Applied via the wp_samesite_cookies filter introduced in WordPress 5.9.
+ * On sites running WP < 5.9 or PHP < 7.3, the filter is not available and
+ * mdes_apply_samesite_to_auth_cookies() patches the Set-Cookie headers
+ * directly after the login action instead.
+ *
+ * @since 1.9.1
+ * @param string $samesite Current SameSite value (WP core default: 'Lax').
+ * @return string SameSite attribute value.
+ */
+function mdes_samesite_cookie_attribute( $samesite ) {
+	return 'Lax';
+}
+
+
+/**
+ * Fallback for WordPress < 5.9 / PHP < 7.3: patch the queued Set-Cookie
+ * response headers for WordPress authentication cookies to include SameSite=Lax.
+ *
+ * Hooked to wp_login at priority 1 so it runs immediately after
+ * wp_set_auth_cookie() has called setcookie() — at which point the
+ * Set-Cookie headers are queued but no response body has been produced yet,
+ * so headers can still be modified.
+ *
+ * All existing Set-Cookie headers are captured, removed, and re-queued.
+ * Only WordPress authentication cookies that lack a SameSite directive have
+ * '; SameSite=Lax' appended; all other cookies are restored unchanged.
+ *
+ * @since 1.9.1
+ * @param string  $user_login Authenticated username.
+ * @param WP_User $user       The authenticated user object.
+ */
+function mdes_apply_samesite_to_auth_cookies( $user_login, $user ) {
+	if ( headers_sent() ) {
+		return;
+	}
+
+	$wp_auth_prefixes = array(
+		'wordpress_logged_in_',
+		'wordpress_sec_',
+		'wordpress_',
+	);
+
+	$existing_headers = headers_list();
+	header_remove( 'Set-Cookie' );
+
+	foreach ( $existing_headers as $header ) {
+		if ( 0 !== stripos( $header, 'Set-Cookie:' ) ) {
+			continue;
+		}
+
+		$cookie_str  = trim( substr( $header, strlen( 'Set-Cookie:' ) ) );
+		$cookie_name = strtolower( trim( explode( '=', $cookie_str, 2 )[0] ) );
+
+		$is_wp_auth = false;
+		foreach ( $wp_auth_prefixes as $prefix ) {
+			if ( 0 === strpos( $cookie_name, $prefix ) ) {
+				$is_wp_auth = true;
+				break;
+			}
+		}
+
+		if ( $is_wp_auth && false === stripos( $cookie_str, 'samesite' ) ) {
+			header( 'Set-Cookie: ' . $cookie_str . '; SameSite=Lax', false );
+		} else {
+			header( 'Set-Cookie: ' . $cookie_str, false );
+		}
+	}
 }
 
 
