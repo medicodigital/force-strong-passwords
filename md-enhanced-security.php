@@ -421,19 +421,6 @@ function mdes_register_settings() {
 	);
 
 	add_settings_field(
-		'enable_input_sanitise',
-		__( 'Enable Input Sanitisation', 'mdes-force-strong-passwords' ),
-		'mdes_field_checkbox_cb',
-		'mdes-force-strong-passwords',
-		'mdes_security_hardening',
-		array(
-			'key'     => 'enable_input_sanitise',
-			'default' => 0,
-			'label'   => __( 'Sanitize incoming $_GET and $_POST values early (recommended). Output escaping is still required in templates.', 'mdes-force-strong-passwords' ),
-		)
-	);
-
-	add_settings_field(
 		'expose_safe_request_uri',
 		__( 'Expose Safe Request URI', 'mdes-force-strong-passwords' ),
 		'mdes_field_checkbox_cb',
@@ -575,7 +562,6 @@ function mdes_sanitize_settings( $input ) {
 
 	$checkboxes = array(
 		'enforce_for_all_users',
-		'enable_input_sanitise',
 		'expose_safe_request_uri',
 		'add_security_headers',
 		'restrict_concurrent_sessions',
